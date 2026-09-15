@@ -1,0 +1,58 @@
+name: Minecraft Canary CI Harness
+
+on:
+  push:
+    branches:
+      - minecraft-plugin-update-canary-ci
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PROJECT_DIR: ${{ runner.temp }}/minecraft-plugin-update-canary
+    steps:
+      - name: Checkout CI harness
+        uses: actions/checkout@v4
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Expand source bundle
+        run: |
+          mkdir -p "$PROJECT_DIR"
+          tar -xJf .canary-ci/source.tar.xz -C "$PROJECT_DIR"
+      - name: Maven verification
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: mvn -B -ntp clean verify
+      - name: Verify Docker daemon
+        run: docker version
+      - name: Prepare clean Paper 1.21.11 test server
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PAPERMC_USER_AGENT: minecraft-plugin-update-canary/0.1 (https://github.com/${{ github.repository }})
+          PAPER_VERSION: '1.21.11'
+        run: |
+          scripts/prepare-paper-test-server.sh "$RUNNER_TEMP/canary-paper"
+          echo "CANARY_TEST_SERVER=$RUNNER_TEMP/canary-paper" >> "$GITHUB_ENV"
+          echo "CANARY_TEST_SERVER_JAR=server.jar" >> "$GITHUB_ENV"
+      - name: Run Docker canonical fixtures and build Marketplace ZIP
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: scripts/package-release.sh
+      - name: Upload Marketplace ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-plugin-update-canary-v0.1
+          path: ${{ env.PROJECT_DIR }}/release/minecraft-plugin-update-canary-v0.1.zip
+          if-no-files-found: error
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: ${{ env.PROJECT_DIR }}/**/target/surefire-reports/**
+          if-no-files-found: ignore
