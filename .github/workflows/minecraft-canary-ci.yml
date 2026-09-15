@@ -28,6 +28,7 @@ jobs:
           mkdir -p _ci_project
           tar -xJf "$RUNNER_TEMP/source.tar.xz" -C _ci_project
           cp .canary-ci/overlays/CanaryProbePlugin.java _ci_project/canary-probe/src/main/java/io/updatecanary/probe/CanaryProbePlugin.java
+          cp .canary-ci/overlays/CanonicalFixtureSuiteTest.java _ci_project/integration-tests/src/test/java/io/updatecanary/integration/CanonicalFixtureSuiteTest.java
           test -f _ci_project/pom.xml
       - name: Maven verification
         working-directory: _ci_project
