@@ -22,11 +22,14 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Expand source bundle
+      - name: Reconstruct and verify source bundle
         run: |
+          cat .canary-ci/source.part* | base64 --decode > "$RUNNER_TEMP/source.tar.xz"
+          echo "bcef91dbf2153275b694c86551a34aab972d0cea7dd5adcca8bf2315e96c5dac  $RUNNER_TEMP/source.tar.xz" | sha256sum -c -
           rm -rf _ci_project
           mkdir -p _ci_project
-          tar -xJf .canary-ci/source.tar.xz -C _ci_project
+          tar -xJf "$RUNNER_TEMP/source.tar.xz" -C _ci_project
+          test -f _ci_project/pom.xml
 
       - name: Maven verification
         working-directory: _ci_project
