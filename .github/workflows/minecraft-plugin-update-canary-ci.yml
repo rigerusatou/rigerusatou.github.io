@@ -1,0 +1,68 @@
+name: Minecraft Plugin Update Canary Release Gate
+
+on:
+  push:
+    branches:
+      - minecraft-plugin-update-canary-ci
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout CI branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct Canary source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/canary-src"
+          cat .canary/p00 .canary/p01 .canary/p02 .canary/p03 .canary/p04 .canary/p05 .canary/p06 .canary/p07 | base64 -d > "$RUNNER_TEMP/canary-ci-min.tar.xz"
+          echo "8e3618a1ccd019cf28fe2008855b2fc1c06885fd4a0a3e9702716a41de591dc4  $RUNNER_TEMP/canary-ci-min.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/canary-ci-min.tar.xz" -C "$RUNNER_TEMP/canary-src"
+          chmod +x "$RUNNER_TEMP/canary-src/scripts/"*.sh
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: '${{ runner.temp }}/canary-src/pom.xml'
+
+      - name: Verify build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          mvn --version
+          docker version
+          zip -v | head -n 2
+
+      - name: Prepare clean Paper test server
+        shell: bash
+        working-directory: ${{ runner.temp }}/canary-src
+        env:
+          PAPER_VERSION: '1.21.11'
+          PAPERMC_USER_AGENT: 'minecraft-plugin-update-canary/0.1 (https://github.com/rigerusatou)'
+        run: scripts/prepare-paper-test-server.sh "$RUNNER_TEMP/canary-paper"
+
+      - name: Run Maven and Docker release gate
+        shell: bash
+        working-directory: ${{ runner.temp }}/canary-src
+        env:
+          CANARY_TEST_SERVER: ${{ runner.temp }}/canary-paper
+          CANARY_TEST_SERVER_JAR: server.jar
+        run: scripts/package-release.sh
+
+      - name: Upload Marketplace ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-plugin-update-canary-v0.1
+          path: ${{ runner.temp }}/canary-src/release/minecraft-plugin-update-canary-v0.1.zip
+          if-no-files-found: error
+          retention-days: 7
