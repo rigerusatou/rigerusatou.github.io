@@ -24,6 +24,8 @@ jobs:
           cat .canary/p00 .canary/p01 .canary/p02 .canary/p03 .canary/p04 .canary/p05 .canary/p06 .canary/p07 | base64 -d > "$RUNNER_TEMP/canary-ci-min.tar.xz"
           echo "8e3618a1ccd019cf28fe2008855b2fc1c06885fd4a0a3e9702716a41de591dc4  $RUNNER_TEMP/canary-ci-min.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/canary-ci-min.tar.xz" -C "$RUNNER_TEMP/canary-src"
+          cp .canary/overrides/CanaryProbePlugin.java "$RUNNER_TEMP/canary-src/canary-probe/src/main/java/io/updatecanary/probe/CanaryProbePlugin.java"
+          cp .canary/overrides/CanaryProbePluginTest.java "$RUNNER_TEMP/canary-src/canary-probe/src/test/java/io/updatecanary/probe/CanaryProbePluginTest.java"
           chmod +x "$RUNNER_TEMP/canary-src/scripts/"*.sh
 
       - name: Set up Java 21
