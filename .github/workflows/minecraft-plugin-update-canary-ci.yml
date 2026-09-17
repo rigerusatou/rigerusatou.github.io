@@ -58,7 +58,18 @@ jobs:
         env:
           CANARY_TEST_SERVER: ${{ runner.temp }}/canary-paper
           CANARY_TEST_SERVER_JAR: server.jar
-        run: scripts/package-release.sh
+        run: |
+          set +e
+          scripts/package-release.sh
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo '=== Canary Docker diagnostic logs ==='
+            find /tmp -type f \( -name 'console.log' -o -name 'console.err.log' \) -print | sort | while read -r f; do
+              echo "===== $f ====="
+              tail -n 160 "$f" || true
+            done
+            exit "$status"
+          fi
 
       - name: Upload Marketplace ZIP
         uses: actions/upload-artifact@v4
