@@ -26,6 +26,7 @@ jobs:
           tar -xJf "$RUNNER_TEMP/canary-ci-min.tar.xz" -C "$RUNNER_TEMP/canary-src"
           cp .canary/overrides/CanaryProbePlugin.java "$RUNNER_TEMP/canary-src/canary-probe/src/main/java/io/updatecanary/probe/CanaryProbePlugin.java"
           cp .canary/overrides/CanaryProbePluginTest.java "$RUNNER_TEMP/canary-src/canary-probe/src/test/java/io/updatecanary/probe/CanaryProbePluginTest.java"
+          cp .canary/overrides/CanonicalFixtureSuiteTest.java "$RUNNER_TEMP/canary-src/integration-tests/src/test/java/io/updatecanary/integration/CanonicalFixtureSuiteTest.java"
           chmod +x "$RUNNER_TEMP/canary-src/scripts/"*.sh
 
       - name: Set up Java 21
