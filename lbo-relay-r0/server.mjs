@@ -5,7 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const PORT = Number(process.env.PORT || 3000);
 const MCP_PATH_SECRET = process.env.MCP_PATH_SECRET;
 const DEVICE_TOKEN = process.env.DEVICE_TOKEN;
@@ -220,8 +220,86 @@ function buildMcpServer() {
   return mcp;
 }
 
+
+function buildDevMcpServer() {
+  const mcp = new McpServer(
+    {
+      name: 'Selfish Dev Read-only Bridge',
+      version: VERSION
+    },
+    {
+      instructions:
+        'Temporary development-only read-only bridge for verifying ChatGPT -> relay -> paired local Selfish connectivity. This endpoint exposes status only and must not be treated as the production plugin endpoint.'
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_relay_status',
+    {
+      title: 'Selfish Relay Status',
+      description:
+        'Read whether the Selfish relay currently has the paired local worker connected. Development diagnostic only.',
+      inputSchema: z.object({}),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const connected = devices.has(DEFAULT_DEVICE_ID);
+      return {
+        content: [{
+          type: 'text',
+          text: `Selfish relay online; local_worker_connected=${connected}`
+        }],
+        structuredContent: {
+          status: 'PASS',
+          relay_version: VERSION,
+          local_worker_connected: connected,
+          connected_device_count: devices.size
+        }
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_status',
+    {
+      title: 'Selfish Status',
+      description:
+        'Read the paired local Selfish worker state through the relay. Development diagnostic only. No browser credentials or profile data are returned.',
+      inputSchema: z.object({}),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'STATUS', {});
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish state=${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  return mcp;
+}
+
 const mcpHandler = createMcpHandler(buildMcpServer);
 const nodeMcpHandler = toNodeHandler(mcpHandler);
+const devMcpHandler = createMcpHandler(buildDevMcpServer);
+const nodeDevMcpHandler = toNodeHandler(devMcpHandler);
 
 const server = http.createServer((req, res) => {
   const base = `http://${req.headers.host || 'localhost'}`;
@@ -239,6 +317,11 @@ const server = http.createServer((req, res) => {
       connected_device_count: devices.size,
       default_device_connected: devices.has(DEFAULT_DEVICE_ID)
     }));
+    return;
+  }
+
+  if (url.pathname === '/mcp-dev') {
+    void nodeDevMcpHandler(req, res);
     return;
   }
 
