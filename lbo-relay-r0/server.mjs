@@ -5,7 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 
-const VERSION = '0.2.3';
+const VERSION = '0.3.0';
 const DEV_EXEC_TOKEN_SHA256 = 'ade84750c99fcd5dfe8a0edbcf0c60a17981388da1b7ea3f29d348f1cea47a9d';
 const DEV_EXEC_EXPIRES_AT = '2026-10-20T06:45:42Z';
 const PORT = Number(process.env.PORT || 3000);
@@ -536,6 +536,170 @@ function buildDevWebMcpServer() {
   return mcp;
 }
 
+
+function buildDevPrimitiveMcpServer() {
+  const roleLocator = z.object({
+    kind: z.literal('role'),
+    role: z.enum(['button', 'link', 'textbox', 'checkbox', 'radio', 'combobox']),
+    name: z.string().min(1).max(128)
+  }).strict();
+
+  const labelLocator = z.object({
+    kind: z.literal('label'),
+    name: z.string().min(1).max(128)
+  }).strict();
+
+  const textLocator = z.object({
+    kind: z.literal('text'),
+    text: z.string().min(1).max(256)
+  }).strict();
+
+  const readableLocator = z.union([roleLocator, labelLocator, textLocator]);
+  const editableLocator = z.union([roleLocator, labelLocator]);
+
+  const browserStep = z.discriminatedUnion('action', [
+    z.object({
+      action: z.literal('NAVIGATE')
+    }).strict(),
+    z.object({
+      action: z.literal('READ_TITLE')
+    }).strict(),
+    z.object({
+      action: z.literal('READ_TEXT'),
+      locator: readableLocator,
+      max_chars: z.number().int().min(1).max(4096)
+    }).strict(),
+    z.object({
+      action: z.literal('TYPE'),
+      locator: editableLocator,
+      text: z.string().min(1).max(512)
+    }).strict(),
+    z.object({
+      action: z.literal('CLICK'),
+      locator: roleLocator
+    }).strict()
+  ]);
+
+  const mcp = new McpServer(
+    {
+      name: 'Selfish Dev Safe Browser Primitives',
+      version: VERSION
+    },
+    {
+      instructions:
+        'Temporary authenticated S4 development bridge. The model may provide a short semantic browser plan, but the paired local Selfish worker remains authoritative for origin policy, semantic-locator validation, side-effect approval, dedupe, hidden-state checks, and fail-closed execution. Arbitrary CSS/XPath/JavaScript/CDP/shell is not exposed.'
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_relay_status',
+    {
+      title: 'Selfish Relay Status',
+      description: 'Read whether the paired local Selfish worker is connected.',
+      inputSchema: z.object({}).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const connected = devices.has(DEFAULT_DEVICE_ID);
+      return {
+        content: [{
+          type: 'text',
+          text: `Selfish relay online; local_worker_connected=${connected}`
+        }],
+        structuredContent: {
+          status: 'PASS',
+          relay_version: VERSION,
+          local_worker_connected: connected,
+          connected_device_count: devices.size
+        }
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_status',
+    {
+      title: 'Selfish Status',
+      description: 'Read the paired local Selfish worker state through the relay.',
+      inputSchema: z.object({}).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'STATUS', {});
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish state=${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_execute_browser_task',
+    {
+      title: 'Execute Selfish Safe Browser Task',
+      description:
+        'Execute a bounded semantic browser task on the paired PC. No arbitrary selectors, JavaScript, CDP, shell, credentials, cookies, or profile export are accepted. The local worker enforces the current S4 origin policy and side-effect approval.',
+      inputSchema: z.object({
+        request_id: z.string()
+          .min(1)
+          .max(128)
+          .regex(/^[A-Za-z0-9._:-]+$/),
+        target_url: z.string().url().max(512),
+        side_effect_approval: z.boolean(),
+        steps: z.array(browserStep).min(1).max(8)
+      }).strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
+    },
+    async ({ request_id, target_url, side_effect_approval, steps }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'SAFE_BROWSER_TASK',
+        {
+          request_id,
+          target_url,
+          side_effect_approval,
+          steps
+        },
+        35000
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish browser task ${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish browser task ${result.status}: ${result.reason ?? 'unknown'}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  return mcp;
+}
+
 const mcpHandler = createMcpHandler(buildMcpServer);
 const nodeMcpHandler = toNodeHandler(mcpHandler);
 const devMcpHandler = createMcpHandler(buildDevMcpServer);
@@ -544,6 +708,8 @@ const devExecMcpHandler = createMcpHandler(buildDevExecMcpServer);
 const nodeDevExecMcpHandler = toNodeHandler(devExecMcpHandler);
 const devWebMcpHandler = createMcpHandler(buildDevWebMcpServer);
 const nodeDevWebMcpHandler = toNodeHandler(devWebMcpHandler);
+const devPrimitiveMcpHandler = createMcpHandler(buildDevPrimitiveMcpServer);
+const nodeDevPrimitiveMcpHandler = toNodeHandler(devPrimitiveMcpHandler);
 
 const server = http.createServer((req, res) => {
   const base = `http://${req.headers.host || 'localhost'}`;
@@ -592,6 +758,19 @@ const server = http.createServer((req, res) => {
       return;
     }
     void nodeDevWebMcpHandler(req, res);
+    return;
+  }
+
+  if (url.pathname === '/mcp-dev-primitives') {
+    if (!authorizeDevExec(req)) {
+      res.writeHead(401, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      res.end(JSON.stringify({ error: 'UNAUTHORIZED_DEV_PRIMITIVES' }));
+      return;
+    }
+    void nodeDevPrimitiveMcpHandler(req, res);
     return;
   }
 
