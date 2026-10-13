@@ -5,7 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const DEV_EXEC_TOKEN_SHA256 = 'ade84750c99fcd5dfe8a0edbcf0c60a17981388da1b7ea3f29d348f1cea47a9d';
 const DEV_EXEC_EXPIRES_AT = '2026-10-20T06:45:42Z';
 const PORT = Number(process.env.PORT || 3000);
@@ -700,6 +700,163 @@ function buildDevPrimitiveMcpServer() {
   return mcp;
 }
 
+
+function buildDevPublicMcpServer() {
+  const roleLocator = z.object({
+    kind: z.literal('role'),
+    role: z.enum(['button', 'link', 'textbox', 'checkbox', 'radio', 'combobox']),
+    name: z.string().min(1).max(128)
+  }).strict();
+
+  const labelLocator = z.object({
+    kind: z.literal('label'),
+    name: z.string().min(1).max(128)
+  }).strict();
+
+  const textLocator = z.object({
+    kind: z.literal('text'),
+    text: z.string().min(1).max(256)
+  }).strict();
+
+  const readableLocator = z.union([roleLocator, labelLocator, textLocator]);
+  const editableLocator = z.union([roleLocator, labelLocator]);
+
+  const browserStep = z.discriminatedUnion('action', [
+    z.object({ action: z.literal('NAVIGATE') }).strict(),
+    z.object({ action: z.literal('READ_TITLE') }).strict(),
+    z.object({
+      action: z.literal('READ_TEXT'),
+      locator: readableLocator,
+      max_chars: z.number().int().min(1).max(4096)
+    }).strict(),
+    z.object({
+      action: z.literal('TYPE'),
+      locator: editableLocator,
+      text: z.string().min(1).max(512)
+    }).strict(),
+    z.object({
+      action: z.literal('CLICK'),
+      locator: roleLocator
+    }).strict()
+  ]);
+
+  const mcp = new McpServer(
+    {
+      name: 'Selfish Dev Public HTTPS Browser',
+      version: VERSION
+    },
+    {
+      instructions:
+        'Temporary authenticated S5 development bridge. Caller-supplied browser targets are accepted only through the paired local Selfish worker, which enforces public-HTTPS DNS/IP policy, redirect/subresource checks, semantic locators, side-effect approval, takeover boundaries, dedupe, and hidden-state requirements. No arbitrary selector/JS/CDP/shell interface is exposed.'
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_relay_status',
+    {
+      title: 'Selfish Relay Status',
+      description: 'Read whether the paired local Selfish worker is connected.',
+      inputSchema: z.object({}).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const connected = devices.has(DEFAULT_DEVICE_ID);
+      return {
+        content: [{ type: 'text', text: `Selfish relay online; local_worker_connected=${connected}` }],
+        structuredContent: {
+          status: 'PASS',
+          relay_version: VERSION,
+          local_worker_connected: connected,
+          connected_device_count: devices.size
+        }
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_status',
+    {
+      title: 'Selfish Status',
+      description: 'Read the paired local Selfish worker state through the relay.',
+      inputSchema: z.object({}).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'STATUS', {});
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish state=${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_execute_public_browser_task',
+    {
+      title: 'Execute Selfish Public HTTPS Browser Task',
+      description:
+        'Execute a bounded semantic browser task on a caller-supplied public HTTPS target. The local worker rejects local/private/non-public network destinations and rechecks page network requests. TYPE/CLICK require explicit side-effect approval. Arbitrary CSS/XPath/JavaScript/CDP/shell is not accepted.',
+      inputSchema: z.object({
+        request_id: z.string()
+          .min(1)
+          .max(128)
+          .regex(/^[A-Za-z0-9._:-]+$/),
+        target_url: z.string().url().max(512),
+        side_effect_approval: z.boolean(),
+        steps: z.array(browserStep).min(1).max(8)
+      }).strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
+    },
+    async ({ request_id, target_url, side_effect_approval, steps }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'PUBLIC_BROWSER_TASK',
+        {
+          request_id,
+          target_url,
+          side_effect_approval,
+          steps
+        },
+        40000
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish public browser task ${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish public browser task ${result.status}: ${result.reason ?? 'unknown'}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  return mcp;
+}
+
 const mcpHandler = createMcpHandler(buildMcpServer);
 const nodeMcpHandler = toNodeHandler(mcpHandler);
 const devMcpHandler = createMcpHandler(buildDevMcpServer);
@@ -710,6 +867,8 @@ const devWebMcpHandler = createMcpHandler(buildDevWebMcpServer);
 const nodeDevWebMcpHandler = toNodeHandler(devWebMcpHandler);
 const devPrimitiveMcpHandler = createMcpHandler(buildDevPrimitiveMcpServer);
 const nodeDevPrimitiveMcpHandler = toNodeHandler(devPrimitiveMcpHandler);
+const devPublicMcpHandler = createMcpHandler(buildDevPublicMcpServer);
+const nodeDevPublicMcpHandler = toNodeHandler(devPublicMcpHandler);
 
 const server = http.createServer((req, res) => {
   const base = `http://${req.headers.host || 'localhost'}`;
@@ -771,6 +930,28 @@ const server = http.createServer((req, res) => {
       return;
     }
     void nodeDevPrimitiveMcpHandler(req, res);
+    return;
+  }
+
+  if (url.pathname === '/mcp-dev-public') {
+    if (!authorizeDevExec(req)) {
+      res.writeHead(401, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      res.end(JSON.stringify({ error: 'UNAUTHORIZED_DEV_PUBLIC' }));
+      return;
+    }
+    void nodeDevPublicMcpHandler(req, res);
+    return;
+  }
+
+  if (url.pathname === '/s5-redirect-private') {
+    res.writeHead(302, {
+      location: 'https://127.0.0.1/',
+      'cache-control': 'no-store'
+    });
+    res.end();
     return;
   }
 
