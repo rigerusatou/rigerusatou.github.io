@@ -5,7 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 
-const VERSION = '0.2.2';
+const VERSION = '0.2.3';
 const DEV_EXEC_TOKEN_SHA256 = 'ade84750c99fcd5dfe8a0edbcf0c60a17981388da1b7ea3f29d348f1cea47a9d';
 const DEV_EXEC_EXPIRES_AT = '2026-10-20T06:45:42Z';
 const PORT = Number(process.env.PORT || 3000);
@@ -420,12 +420,130 @@ function buildDevExecMcpServer() {
   return mcp;
 }
 
+
+function buildDevWebMcpServer() {
+  const mcp = new McpServer(
+    {
+      name: 'Selfish Dev Controlled Web Bridge',
+      version: VERSION
+    },
+    {
+      instructions:
+        'Temporary authenticated S3 development gate. It exposes status plus one bounded Selenium-project test-form task. The local PC control plane enforces the exact target URL and fixed internal selectors. Arbitrary website access remains disabled.'
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_relay_status',
+    {
+      title: 'Selfish Relay Status',
+      description: 'Read whether the paired local Selfish worker is connected.',
+      inputSchema: z.object({}),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const connected = devices.has(DEFAULT_DEVICE_ID);
+      return {
+        content: [{
+          type: 'text',
+          text: `Selfish relay online; local_worker_connected=${connected}`
+        }],
+        structuredContent: {
+          status: 'PASS',
+          relay_version: VERSION,
+          local_worker_connected: connected,
+          connected_device_count: devices.size
+        }
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_status',
+    {
+      title: 'Selfish Status',
+      description: 'Read the paired local Selfish worker state through the relay.',
+      inputSchema: z.object({}),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'STATUS', {});
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish state=${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_run_selenium_web_form_test',
+    {
+      title: 'Run Selfish Controlled Selenium Web Form Test',
+      description:
+        'Run a bounded real-web test against the Selenium project web-form page. The caller supplies a target_url so the local execution firewall can prove that non-allowlisted origins are rejected. Selectors remain fixed inside the local worker.',
+      inputSchema: z.object({
+        request_id: z.string()
+          .min(1)
+          .max(128)
+          .regex(/^[A-Za-z0-9._:-]+$/),
+        target_url: z.string().url().max(512),
+        text: z.string().min(1).max(128)
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
+    },
+    async ({ request_id, target_url, text }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'SELENIUM_WEB_FORM',
+        { request_id, target_url, text },
+        30000
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish controlled web task ${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish controlled web task ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  return mcp;
+}
+
 const mcpHandler = createMcpHandler(buildMcpServer);
 const nodeMcpHandler = toNodeHandler(mcpHandler);
 const devMcpHandler = createMcpHandler(buildDevMcpServer);
 const nodeDevMcpHandler = toNodeHandler(devMcpHandler);
 const devExecMcpHandler = createMcpHandler(buildDevExecMcpServer);
 const nodeDevExecMcpHandler = toNodeHandler(devExecMcpHandler);
+const devWebMcpHandler = createMcpHandler(buildDevWebMcpServer);
+const nodeDevWebMcpHandler = toNodeHandler(devWebMcpHandler);
 
 const server = http.createServer((req, res) => {
   const base = `http://${req.headers.host || 'localhost'}`;
@@ -461,6 +579,19 @@ const server = http.createServer((req, res) => {
       return;
     }
     void nodeDevExecMcpHandler(req, res);
+    return;
+  }
+
+  if (url.pathname === '/mcp-dev-web') {
+    if (!authorizeDevExec(req)) {
+      res.writeHead(401, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      res.end(JSON.stringify({ error: 'UNAUTHORIZED_DEV_WEB' }));
+      return;
+    }
+    void nodeDevWebMcpHandler(req, res);
     return;
   }
 
