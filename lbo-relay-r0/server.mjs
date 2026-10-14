@@ -5,7 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 const DEV_EXEC_TOKEN_SHA256 = 'ade84750c99fcd5dfe8a0edbcf0c60a17981388da1b7ea3f29d348f1cea47a9d';
 const DEV_EXEC_EXPIRES_AT = '2026-10-20T06:45:42Z';
 const PORT = Number(process.env.PORT || 3000);
@@ -1171,6 +1171,99 @@ function buildDevContinuityMcpServer() {
   return mcp;
 }
 
+
+const CHATGPT_S8_EXPIRES_AT = '2026-10-21T06:00:00Z';
+const CHATGPT_S8_TARGET = 'https://www.selenium.dev/selenium/web/web-form.html';
+
+function buildChatGptS8McpServer() {
+  const mcp = new McpServer(
+    {
+      name: 'Selfish S8 ChatGPT Native Test',
+      version: VERSION
+    },
+    {
+      instructions:
+        'Temporary bounded S8 endpoint for proving native ChatGPT -> Selfish invocation. It exposes status plus one Selenium-project demo task only. It does not accept arbitrary URLs, selectors, credentials, JavaScript, CDP, shell, cookies, or profile export.'
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_status',
+    {
+      title: 'Selfish Status',
+      description:
+        'Read the current state of the paired local Selfish worker. No page content, credentials, cookies, or profile data are returned.',
+      inputSchema: z.object({}).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'STATUS', {});
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish state=${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_run_chatgpt_native_test',
+    {
+      title: 'Run Selfish ChatGPT Native Browser Test',
+      description:
+        'Run one bounded browser action sequence on the Selenium project public demo form. This is only for S8 ChatGPT-native invocation testing and cannot access arbitrary sites.',
+      inputSchema: z.object({
+        request_id: z.string()
+          .min(1)
+          .max(128)
+          .regex(/^[A-Za-z0-9._:-]+$/),
+        text: z.string().min(1).max(64)
+      }).strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async ({ request_id, text }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'SELENIUM_WEB_FORM',
+        {
+          request_id,
+          target_url: CHATGPT_S8_TARGET,
+          text
+        },
+        30000
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish native test completed; state=${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish native test ${result.status}: ${result.reason ?? 'unknown'}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  return mcp;
+}
+
 const mcpHandler = createMcpHandler(buildMcpServer);
 const nodeMcpHandler = toNodeHandler(mcpHandler);
 const devMcpHandler = createMcpHandler(buildDevMcpServer);
@@ -1187,6 +1280,8 @@ const devTakeoverMcpHandler = createMcpHandler(buildDevTakeoverMcpServer);
 const nodeDevTakeoverMcpHandler = toNodeHandler(devTakeoverMcpHandler);
 const devContinuityMcpHandler = createMcpHandler(buildDevContinuityMcpServer);
 const nodeDevContinuityMcpHandler = toNodeHandler(devContinuityMcpHandler);
+const chatGptS8McpHandler = createMcpHandler(buildChatGptS8McpServer);
+const nodeChatGptS8McpHandler = toNodeHandler(chatGptS8McpHandler);
 
 const server = http.createServer((req, res) => {
   const base = `http://${req.headers.host || 'localhost'}`;
@@ -1296,6 +1391,19 @@ const server = http.createServer((req, res) => {
       'cache-control': 'no-store'
     });
     res.end();
+    return;
+  }
+
+  if (url.pathname === '/mcp-chatgpt-s8') {
+    if (Date.now() >= Date.parse(CHATGPT_S8_EXPIRES_AT)) {
+      res.writeHead(410, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      res.end(JSON.stringify({ error: 'S8_DEV_ENDPOINT_EXPIRED' }));
+      return;
+    }
+    void nodeChatGptS8McpHandler(req, res);
     return;
   }
 
