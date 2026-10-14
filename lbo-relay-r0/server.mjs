@@ -5,7 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const DEV_EXEC_TOKEN_SHA256 = 'ade84750c99fcd5dfe8a0edbcf0c60a17981388da1b7ea3f29d348f1cea47a9d';
 const DEV_EXEC_EXPIRES_AT = '2026-10-20T06:45:42Z';
 const PORT = Number(process.env.PORT || 3000);
@@ -1038,6 +1038,139 @@ function buildDevTakeoverMcpServer() {
   return mcp;
 }
 
+
+function buildDevContinuityMcpServer() {
+  const mcp = new McpServer(
+    {
+      name: 'Selfish Dev Takeover Continuity',
+      version: VERSION
+    },
+    {
+      instructions:
+        'Temporary authenticated S7 development bridge. It proves that a durable local browser job can checkpoint before human takeover, preserve the exact same page/session, and resume the same persisted job from its checkpoint after explicit human proof. No credentials are requested or transported.'
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_relay_status',
+    {
+      title: 'Selfish Relay Status',
+      description: 'Read whether the paired local Selfish worker is connected.',
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async () => {
+      const connected = devices.has(DEFAULT_DEVICE_ID);
+      return {
+        content: [{ type: 'text', text: `Selfish relay online; local_worker_connected=${connected}` }],
+        structuredContent: {
+          status: 'PASS',
+          relay_version: VERSION,
+          local_worker_connected: connected,
+          connected_device_count: devices.size
+        }
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_status',
+    {
+      title: 'Selfish Status',
+      description: 'Read local Selfish runtime state without page content.',
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'STATUS', {});
+      return {
+        content: [{ type: 'text', text: `Selfish state=${result.result?.state ?? result.status}` }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_start_continuity_test',
+    {
+      title: 'Start Selfish Durable Takeover Continuity Test',
+      description:
+        'Start one bounded Selenium-page continuity task. It performs pre-takeover work, checkpoints, and then requires human takeover. Exact retries reuse the same durable job.',
+      inputSchema: z.object({
+        request_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
+        before_marker: z.string().min(1).max(64).regex(/^[A-Za-z0-9._:-]+$/),
+        after_marker: z.string().min(1).max(64).regex(/^[A-Za-z0-9._:-]+$/)
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async ({ request_id, before_marker, after_marker }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'S7_CONTINUITY_START',
+        { request_id, before_marker, after_marker },
+        35000
+      );
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'TAKEOVER_REQUIRED'
+              ? 'Selfish durable task checkpointed; human takeover is required.'
+              : `Selfish continuity start ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_takeover_privacy_probe',
+    {
+      title: 'Probe Selfish Takeover Privacy Fence',
+      description: 'Read takeover state and preview fence status without reading page DOM or pixels.',
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'TAKEOVER_PRIVACY_PROBE', {}, 10000);
+      return { content: [{ type: 'text', text: `Takeover state=${result.result?.state ?? result.status}` }], structuredContent: result };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_resume_continuity_test',
+    {
+      title: 'Resume Selfish Durable Takeover Continuity Test',
+      description:
+        'After the human checks Default checkbox in the visible Selenium page, explicitly resume. The local worker revalidates the same page/session, hides the same browser, and continues the same persisted job from its durable checkpoint.',
+      inputSchema: z.object({
+        takeover_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/)
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    async ({ takeover_id }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'S7_CONTINUITY_RESUME',
+        { takeover_id },
+        40000
+      );
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? 'Selfish resumed the same durable task from checkpoint.'
+              : `Selfish continuity resume ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  return mcp;
+}
+
 const mcpHandler = createMcpHandler(buildMcpServer);
 const nodeMcpHandler = toNodeHandler(mcpHandler);
 const devMcpHandler = createMcpHandler(buildDevMcpServer);
@@ -1052,6 +1185,8 @@ const devPublicMcpHandler = createMcpHandler(buildDevPublicMcpServer);
 const nodeDevPublicMcpHandler = toNodeHandler(devPublicMcpHandler);
 const devTakeoverMcpHandler = createMcpHandler(buildDevTakeoverMcpServer);
 const nodeDevTakeoverMcpHandler = toNodeHandler(devTakeoverMcpHandler);
+const devContinuityMcpHandler = createMcpHandler(buildDevContinuityMcpServer);
+const nodeDevContinuityMcpHandler = toNodeHandler(devContinuityMcpHandler);
 
 const server = http.createServer((req, res) => {
   const base = `http://${req.headers.host || 'localhost'}`;
@@ -1139,6 +1274,19 @@ const server = http.createServer((req, res) => {
       return;
     }
     void nodeDevTakeoverMcpHandler(req, res);
+    return;
+  }
+
+  if (url.pathname === '/mcp-dev-continuity') {
+    if (!authorizeDevExec(req)) {
+      res.writeHead(401, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      res.end(JSON.stringify({ error: 'UNAUTHORIZED_DEV_CONTINUITY' }));
+      return;
+    }
+    void nodeDevContinuityMcpHandler(req, res);
     return;
   }
 
