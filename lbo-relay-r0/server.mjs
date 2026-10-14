@@ -5,12 +5,19 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 const DEV_EXEC_TOKEN_SHA256 = 'ade84750c99fcd5dfe8a0edbcf0c60a17981388da1b7ea3f29d348f1cea47a9d';
 const DEV_EXEC_EXPIRES_AT = '2026-10-20T06:45:42Z';
 const PORT = Number(process.env.PORT || 3000);
 const MCP_PATH_SECRET = process.env.MCP_PATH_SECRET;
 const DEVICE_TOKEN = process.env.DEVICE_TOKEN;
+const S9_OAUTH_SIGNING_SECRET = process.env.S9_OAUTH_SIGNING_SECRET;
+const PUBLIC_BASE_URL = 'https://lbo-relay-r0.onrender.com';
+const S9_MCP_PATH = '/mcp-chatgpt-s9';
+const S9_RESOURCE = `${PUBLIC_BASE_URL}${S9_MCP_PATH}`;
+const S9_PROTECTED_RESOURCE_METADATA = `${PUBLIC_BASE_URL}/.well-known/oauth-protected-resource/mcp-chatgpt-s9`;
+const S9_SCOPES = ['selfish.read', 'selfish.write', 'offline_access'];
+
 const DEFAULT_DEVICE_ID = process.env.DEFAULT_DEVICE_ID || 'dohuremi-pc';
 
 if (!MCP_PATH_SECRET || MCP_PATH_SECRET.length < 24) {
@@ -19,6 +26,10 @@ if (!MCP_PATH_SECRET || MCP_PATH_SECRET.length < 24) {
 if (!DEVICE_TOKEN || DEVICE_TOKEN.length < 24) {
   throw new Error('DEVICE_TOKEN must be set and at least 24 characters.');
 }
+if (!S9_OAUTH_SIGNING_SECRET || S9_OAUTH_SIGNING_SECRET.length < 48) {
+  throw new Error('S9_OAUTH_SIGNING_SECRET must be set and at least 48 characters.');
+}
+
 
 const MCP_PATH = `/mcp/${MCP_PATH_SECRET}`;
 const DEVICE_PATH = '/device';
@@ -48,6 +59,293 @@ function authorizeDevExec(req) {
   if (!bearer) return false;
   const digest = crypto.createHash('sha256').update(bearer).digest('hex');
   return safeEqual(digest, DEV_EXEC_TOKEN_SHA256);
+}
+
+
+const s9AuthCodes = new Map();
+
+function s9Base64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
+function s9SignToken(payload) {
+  const body = s9Base64UrlJson(payload);
+  const sig = crypto
+    .createHmac('sha256', S9_OAUTH_SIGNING_SECRET)
+    .update(body)
+    .digest('base64url');
+  return `${body}.${sig}`;
+}
+
+function s9VerifyToken(token, expectedType) {
+  try {
+    const [body, sig] = String(token || '').split('.');
+    if (!body || !sig) return null;
+    const expected = crypto
+      .createHmac('sha256', S9_OAUTH_SIGNING_SECRET)
+      .update(body)
+      .digest('base64url');
+    if (!safeEqual(sig, expected)) return null;
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (payload.typ !== expectedType) return null;
+    if (payload.aud !== S9_RESOURCE) return null;
+    if (!Number.isFinite(payload.exp) || Date.now() >= payload.exp * 1000) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function s9IssueTokens(clientId, scope) {
+  const now = Math.floor(Date.now() / 1000);
+  const normalizedScope = S9_SCOPES.filter(x => String(scope || '').split(/\s+/).includes(x));
+  for (const required of ['selfish.read', 'selfish.write']) {
+    if (!normalizedScope.includes(required)) normalizedScope.push(required);
+  }
+  if (!normalizedScope.includes('offline_access')) normalizedScope.push('offline_access');
+  const scopeText = normalizedScope.join(' ');
+
+  const accessToken = s9SignToken({
+    typ: 'access',
+    sub: 'selfish-local-owner',
+    cid: clientId,
+    aud: S9_RESOURCE,
+    scope: scopeText,
+    iat: now,
+    exp: now + 900,
+    jti: crypto.randomUUID()
+  });
+
+  const refreshToken = s9SignToken({
+    typ: 'refresh',
+    sub: 'selfish-local-owner',
+    cid: clientId,
+    aud: S9_RESOURCE,
+    scope: scopeText,
+    iat: now,
+    exp: now + (7 * 24 * 60 * 60),
+    jti: crypto.randomUUID()
+  });
+
+  return {
+    token_type: 'Bearer',
+    access_token: accessToken,
+    expires_in: 900,
+    refresh_token: refreshToken,
+    scope: scopeText
+  };
+}
+
+function s9AllowedRedirectUri(raw) {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:' || u.hostname !== 'chatgpt.com') return false;
+    return (
+      u.pathname === '/connector_platform_oauth_redirect' ||
+      u.pathname.startsWith('/connector/oauth/')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function s9ScopeAllowed(scopeText) {
+  const requested = String(scopeText || '')
+    .split(/\s+/)
+    .filter(Boolean);
+  return requested.every(x => S9_SCOPES.includes(x));
+}
+
+async function readHttpBody(req, maxBytes = 65536) {
+  return await new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error('REQUEST_BODY_TOO_LARGE'));
+        try { req.destroy(); } catch {}
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+function writeJson(res, status, value, extraHeaders = {}) {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    ...extraHeaders
+  });
+  res.end(JSON.stringify(value));
+}
+
+function writeHtml(res, status, html) {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store'
+  });
+  res.end(html);
+}
+
+function s9AccessFromRequest(req) {
+  const token = parseBearer(req);
+  const payload = s9VerifyToken(token, 'access');
+  if (!payload) return null;
+  const scopes = new Set(String(payload.scope || '').split(/\s+/).filter(Boolean));
+  if (!scopes.has('selfish.read') || !scopes.has('selfish.write')) return null;
+  return payload;
+}
+
+async function handleS9DynamicRegistration(req, res) {
+  try {
+    const raw = await readHttpBody(req);
+    const body = JSON.parse(raw || '{}');
+    const redirects = Array.isArray(body.redirect_uris) ? body.redirect_uris.map(String) : [];
+    if (redirects.length < 1 || redirects.some(x => !s9AllowedRedirectUri(x))) {
+      writeJson(res, 400, { error: 'invalid_redirect_uri' });
+      return;
+    }
+    const clientId = `selfish-s9-${crypto
+      .createHash('sha256')
+      .update(JSON.stringify(redirects))
+      .digest('hex')
+      .slice(0, 32)}`;
+    writeJson(res, 201, {
+      client_id: clientId,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      redirect_uris: redirects,
+      token_endpoint_auth_method: 'none',
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      client_name: 'ChatGPT'
+    });
+  } catch {
+    writeJson(res, 400, { error: 'invalid_client_metadata' });
+  }
+}
+
+async function handleS9Authorize(req, res, url) {
+  const q = url.searchParams;
+  const responseType = q.get('response_type');
+  const clientId = String(q.get('client_id') || '');
+  const redirectUri = String(q.get('redirect_uri') || '');
+  const stateParam = String(q.get('state') || '');
+  const codeChallenge = String(q.get('code_challenge') || '');
+  const codeChallengeMethod = String(q.get('code_challenge_method') || '');
+  const resource = String(q.get('resource') || '');
+  const scope = String(q.get('scope') || 'selfish.read selfish.write offline_access');
+
+  if (
+    responseType !== 'code' ||
+    !clientId.startsWith('selfish-s9-') ||
+    !s9AllowedRedirectUri(redirectUri) ||
+    codeChallengeMethod !== 'S256' ||
+    codeChallenge.length < 32 ||
+    resource !== S9_RESOURCE ||
+    !s9ScopeAllowed(scope)
+  ) {
+    writeHtml(res, 400, '<h1>Selfish authorization request rejected</h1>');
+    return;
+  }
+
+  const approval = await sendDeviceJob(
+    DEFAULT_DEVICE_ID,
+    'OAUTH_PAIRING_APPROVAL',
+    {},
+    95000
+  );
+
+  if (approval.status !== 'PASS' || approval.result?.approved !== true) {
+    writeHtml(
+      res,
+      403,
+      '<h1>Selfish connection not approved</h1><p>The local PC user did not approve this ChatGPT connection.</p>'
+    );
+    return;
+  }
+
+  const code = crypto.randomBytes(32).toString('base64url');
+  s9AuthCodes.set(code, {
+    clientId,
+    redirectUri,
+    codeChallenge,
+    resource,
+    scope,
+    expiresAt: Date.now() + 5 * 60 * 1000
+  });
+
+  const target = new URL(redirectUri);
+  target.searchParams.set('code', code);
+  if (stateParam) target.searchParams.set('state', stateParam);
+  target.searchParams.set('iss', PUBLIC_BASE_URL);
+  res.writeHead(302, { location: target.toString(), 'cache-control': 'no-store' });
+  res.end();
+}
+
+async function handleS9Token(req, res) {
+  try {
+    const raw = await readHttpBody(req);
+    const form = new URLSearchParams(raw);
+    const grantType = String(form.get('grant_type') || '');
+    const clientId = String(form.get('client_id') || '');
+    const resource = String(form.get('resource') || '');
+
+    if (resource !== S9_RESOURCE || !clientId.startsWith('selfish-s9-')) {
+      writeJson(res, 400, { error: 'invalid_target' });
+      return;
+    }
+
+    if (grantType === 'authorization_code') {
+      const code = String(form.get('code') || '');
+      const redirectUri = String(form.get('redirect_uri') || '');
+      const verifier = String(form.get('code_verifier') || '');
+      const rec = s9AuthCodes.get(code);
+      s9AuthCodes.delete(code);
+
+      if (
+        !rec ||
+        Date.now() >= rec.expiresAt ||
+        rec.clientId !== clientId ||
+        rec.redirectUri !== redirectUri ||
+        rec.resource !== resource ||
+        !s9AllowedRedirectUri(redirectUri)
+      ) {
+        writeJson(res, 400, { error: 'invalid_grant' });
+        return;
+      }
+
+      const actualChallenge = crypto
+        .createHash('sha256')
+        .update(verifier)
+        .digest('base64url');
+
+      if (!safeEqual(actualChallenge, rec.codeChallenge)) {
+        writeJson(res, 400, { error: 'invalid_grant' });
+        return;
+      }
+
+      writeJson(res, 200, s9IssueTokens(clientId, rec.scope));
+      return;
+    }
+
+    if (grantType === 'refresh_token') {
+      const refresh = s9VerifyToken(String(form.get('refresh_token') || ''), 'refresh');
+      if (!refresh || refresh.cid !== clientId) {
+        writeJson(res, 400, { error: 'invalid_grant' });
+        return;
+      }
+      writeJson(res, 200, s9IssueTokens(clientId, refresh.scope));
+      return;
+    }
+
+    writeJson(res, 400, { error: 'unsupported_grant_type' });
+  } catch {
+    writeJson(res, 400, { error: 'invalid_request' });
+  }
 }
 
 function resolvePending(requestId, payload) {
@@ -1264,6 +1562,193 @@ function buildChatGptS8McpServer() {
   return mcp;
 }
 
+
+function buildChatGptS9McpServer() {
+  const roleLocator = z.object({
+    kind: z.literal('role'),
+    role: z.enum(['button', 'link', 'textbox', 'checkbox', 'radio', 'combobox']),
+    name: z.string().min(1).max(128)
+  }).strict();
+
+  const labelLocator = z.object({
+    kind: z.literal('label'),
+    name: z.string().min(1).max(128)
+  }).strict();
+
+  const textLocator = z.object({
+    kind: z.literal('text'),
+    text: z.string().min(1).max(256)
+  }).strict();
+
+  const readableLocator = z.union([roleLocator, labelLocator, textLocator]);
+  const editableLocator = z.union([roleLocator, labelLocator]);
+
+  const readStep = z.discriminatedUnion('action', [
+    z.object({ action: z.literal('NAVIGATE') }).strict(),
+    z.object({ action: z.literal('READ_TITLE') }).strict(),
+    z.object({
+      action: z.literal('READ_TEXT'),
+      locator: readableLocator,
+      max_chars: z.number().int().min(1).max(4096)
+    }).strict()
+  ]);
+
+  const interactStep = z.discriminatedUnion('action', [
+    z.object({ action: z.literal('NAVIGATE') }).strict(),
+    z.object({ action: z.literal('READ_TITLE') }).strict(),
+    z.object({
+      action: z.literal('READ_TEXT'),
+      locator: readableLocator,
+      max_chars: z.number().int().min(1).max(4096)
+    }).strict(),
+    z.object({
+      action: z.literal('TYPE'),
+      locator: editableLocator,
+      text: z.string().min(1).max(512)
+    }).strict(),
+    z.object({
+      action: z.literal('CLICK'),
+      locator: roleLocator
+    }).strict()
+  ]);
+
+  const readSecurity = [{ type: 'oauth2', scopes: ['selfish.read'] }];
+  const writeSecurity = [{ type: 'oauth2', scopes: ['selfish.write'] }];
+
+  const mcp = new McpServer(
+    {
+      name: 'Selfish S9 Native Safe Browser',
+      version: VERSION
+    },
+    {
+      instructions:
+        'Authenticated S9 development bridge for normal ChatGPT conversations. The local Selfish worker executes only public-HTTPS semantic browser primitives and remains authoritative for DNS/IP/redirect policy, dedupe, mismatch blocking, and takeover boundaries. Arbitrary CSS/XPath/JavaScript/CDP/shell and credential/profile export are not exposed.'
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_status',
+    {
+      title: 'Selfish Status',
+      description: 'Read the paired local Selfish worker state.',
+      inputSchema: z.object({}).strict(),
+      securitySchemes: readSecurity,
+      _meta: { securitySchemes: readSecurity },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'STATUS', {});
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish state=${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_read_public_https',
+    {
+      title: 'Read a public HTTPS page with Selfish',
+      description:
+        'Navigate to a caller-supplied public HTTPS page and perform semantic read operations only. Private/local/metadata destinations and redirect escape are blocked locally.',
+      inputSchema: z.object({
+        request_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
+        target_url: z.string().url().max(512),
+        steps: z.array(readStep).min(1).max(8)
+      }).strict(),
+      securitySchemes: readSecurity,
+      _meta: { securitySchemes: readSecurity },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
+    },
+    async ({ request_id, target_url, steps }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'PUBLIC_BROWSER_TASK',
+        {
+          request_id,
+          target_url,
+          side_effect_approval: false,
+          steps
+        },
+        40000
+      );
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? 'Selfish public HTTPS read completed.'
+              : `Selfish public HTTPS read ${result.status}: ${result.reason ?? 'unknown'}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_interact_public_https',
+    {
+      title: 'Interact with a public HTTPS page using Selfish',
+      description:
+        'Perform a user-approved semantic browser interaction on a caller-supplied public HTTPS page. This may type or click and therefore is a write action. The local worker still blocks private/local destinations, redirect escape, secret fields, MFA/CAPTCHA boundaries, ambiguous semantic targets, and duplicate request mismatches.',
+      inputSchema: z.object({
+        request_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
+        target_url: z.string().url().max(512),
+        steps: z.array(interactStep).min(1).max(8)
+      }).strict(),
+      securitySchemes: writeSecurity,
+      _meta: { securitySchemes: writeSecurity },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
+    },
+    async ({ request_id, target_url, steps }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'PUBLIC_BROWSER_TASK',
+        {
+          request_id,
+          target_url,
+          side_effect_approval: true,
+          steps
+        },
+        40000
+      );
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? 'Selfish public HTTPS interaction completed.'
+              : `Selfish public HTTPS interaction ${result.status}: ${result.reason ?? 'unknown'}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  return mcp;
+}
+
 const mcpHandler = createMcpHandler(buildMcpServer);
 const nodeMcpHandler = toNodeHandler(mcpHandler);
 const devMcpHandler = createMcpHandler(buildDevMcpServer);
@@ -1282,6 +1767,9 @@ const devContinuityMcpHandler = createMcpHandler(buildDevContinuityMcpServer);
 const nodeDevContinuityMcpHandler = toNodeHandler(devContinuityMcpHandler);
 const chatGptS8McpHandler = createMcpHandler(buildChatGptS8McpServer);
 const nodeChatGptS8McpHandler = toNodeHandler(chatGptS8McpHandler);
+
+const chatGptS9McpHandler = createMcpHandler(buildChatGptS9McpServer);
+const nodeChatGptS9McpHandler = toNodeHandler(chatGptS9McpHandler);
 
 const server = http.createServer((req, res) => {
   const base = `http://${req.headers.host || 'localhost'}`;
@@ -1391,6 +1879,70 @@ const server = http.createServer((req, res) => {
       'cache-control': 'no-store'
     });
     res.end();
+    return;
+  }
+
+
+  if (
+    url.pathname === '/.well-known/oauth-protected-resource' ||
+    url.pathname === '/.well-known/oauth-protected-resource/mcp-chatgpt-s9'
+  ) {
+    writeJson(res, 200, {
+      resource: S9_RESOURCE,
+      authorization_servers: [PUBLIC_BASE_URL],
+      scopes_supported: S9_SCOPES,
+      bearer_methods_supported: ['header']
+    });
+    return;
+  }
+
+  if (
+    url.pathname === '/.well-known/oauth-authorization-server' ||
+    url.pathname === '/.well-known/openid-configuration'
+  ) {
+    writeJson(res, 200, {
+      issuer: PUBLIC_BASE_URL,
+      authorization_endpoint: `${PUBLIC_BASE_URL}/oauth/authorize`,
+      token_endpoint: `${PUBLIC_BASE_URL}/oauth/token`,
+      registration_endpoint: `${PUBLIC_BASE_URL}/oauth/register`,
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
+      code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none'],
+      scopes_supported: S9_SCOPES,
+      resource_indicators_supported: true
+    });
+    return;
+  }
+
+  if (url.pathname === '/oauth/register' && req.method === 'POST') {
+    void handleS9DynamicRegistration(req, res);
+    return;
+  }
+
+  if (url.pathname === '/oauth/authorize' && req.method === 'GET') {
+    void handleS9Authorize(req, res, url);
+    return;
+  }
+
+  if (url.pathname === '/oauth/token' && req.method === 'POST') {
+    void handleS9Token(req, res);
+    return;
+  }
+
+  if (url.pathname === S9_MCP_PATH) {
+    const access = s9AccessFromRequest(req);
+    if (!access) {
+      res.writeHead(401, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'www-authenticate':
+          `Bearer resource_metadata="${S9_PROTECTED_RESOURCE_METADATA}", error="invalid_token", error_description="Connect Selfish S9 to continue"`
+      });
+      res.end(JSON.stringify({ error: 'S9_OAUTH_REQUIRED' }));
+      return;
+    }
+    void nodeChatGptS9McpHandler(req, res);
     return;
   }
 
