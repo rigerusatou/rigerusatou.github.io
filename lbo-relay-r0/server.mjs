@@ -63,6 +63,7 @@ function authorizeDevExec(req) {
 
 
 const s9AuthCodes = new Map();
+const s9AuthTransactions = new Map();
 
 function s9Base64UrlJson(value) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
@@ -202,6 +203,7 @@ function s9AccessFromRequest(req) {
 
 async function handleS9DynamicRegistration(req, res) {
   try {
+    console.log('[s9-oauth] dynamic_registration=request');
     const raw = await readHttpBody(req);
     const body = JSON.parse(raw || '{}');
     const redirects = Array.isArray(body.redirect_uris) ? body.redirect_uris.map(String) : [];
@@ -252,42 +254,144 @@ async function handleS9Authorize(req, res, url) {
     return;
   }
 
-  const approval = await sendDeviceJob(
+  const txnId = crypto.randomBytes(24).toString('base64url');
+  const txn = {
+    status: 'PENDING',
+    redirect: null,
+    error: null,
+    expiresAt: Date.now() + 2 * 60 * 1000
+  };
+  s9AuthTransactions.set(txnId, txn);
+  console.log('[s9-oauth] authorize=valid waiting_for_local_approval');
+
+  void sendDeviceJob(
     DEFAULT_DEVICE_ID,
     'OAUTH_PAIRING_APPROVAL',
     {},
     95000
-  );
+  ).then((approval) => {
+    if (Date.now() >= txn.expiresAt) {
+      txn.status = 'DENIED';
+      txn.error = 'AUTHORIZATION_TRANSACTION_EXPIRED';
+      return;
+    }
 
-  if (approval.status !== 'PASS' || approval.result?.approved !== true) {
-    writeHtml(
-      res,
-      403,
-      '<h1>Selfish connection not approved</h1><p>The local PC user did not approve this ChatGPT connection.</p>'
-    );
+    if (approval.status !== 'PASS' || approval.result?.approved !== true) {
+      txn.status = 'DENIED';
+      txn.error = approval.reason || 'LOCAL_APPROVAL_NOT_GRANTED';
+      console.log('[s9-oauth] local_approval=denied');
+      return;
+    }
+
+    const code = crypto.randomBytes(32).toString('base64url');
+    s9AuthCodes.set(code, {
+      clientId,
+      redirectUri,
+      codeChallenge,
+      resource,
+      scope,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    });
+
+    const target = new URL(redirectUri);
+    target.searchParams.set('code', code);
+    if (stateParam) target.searchParams.set('state', stateParam);
+    target.searchParams.set('iss', PUBLIC_BASE_URL);
+
+    txn.status = 'APPROVED';
+    txn.redirect = target.toString();
+    console.log('[s9-oauth] local_approval=approved');
+  }).catch(() => {
+    txn.status = 'DENIED';
+    txn.error = 'LOCAL_APPROVAL_TRANSPORT_FAILED';
+    console.log('[s9-oauth] local_approval=transport_failed');
+  });
+
+  const safeTxn = encodeURIComponent(txnId);
+  writeHtml(
+    res,
+    200,
+    `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Selfish - Approve ChatGPT connection</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#111;color:#eee;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{max-width:560px;padding:28px;border:1px solid #333;border-radius:16px;background:#181818}
+h1{font-size:22px;margin:0 0 12px}
+p{line-height:1.5;color:#cfcfcf}
+code{background:#242424;padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Selfish connection approval</h1>
+<p>ChatGPT is requesting a secure connection to the Selfish worker on this PC.</p>
+<p>Check Windows for the <code>Selfish - ChatGPT Connection Approval</code> dialog and click <b>Yes</b> only if you started this connection.</p>
+<p id="status">Waiting for local approval...</p>
+</div>
+<script>
+const statusEl = document.getElementById('status');
+async function poll(){
+  try{
+    const r = await fetch('/oauth/authorize/poll?txn=${safeTxn}', {cache:'no-store'});
+    const j = await r.json();
+    if(j.status === 'APPROVED' && j.redirect){
+      statusEl.textContent = 'Approved. Returning to ChatGPT...';
+      location.replace(j.redirect);
+      return;
+    }
+    if(j.status === 'DENIED'){
+      statusEl.textContent = 'Connection was not approved. You can close this window.';
+      return;
+    }
+    setTimeout(poll, 700);
+  }catch{
+    setTimeout(poll, 1000);
+  }
+}
+poll();
+</script>
+</body>
+</html>`
+  );
+}
+
+function handleS9AuthorizePoll(req, res, url) {
+  const txnId = String(url.searchParams.get('txn') || '');
+  const txn = s9AuthTransactions.get(txnId);
+
+  if (!txn) {
+    writeJson(res, 404, { status: 'DENIED', error: 'UNKNOWN_TRANSACTION' });
     return;
   }
 
-  const code = crypto.randomBytes(32).toString('base64url');
-  s9AuthCodes.set(code, {
-    clientId,
-    redirectUri,
-    codeChallenge,
-    resource,
-    scope,
-    expiresAt: Date.now() + 5 * 60 * 1000
-  });
+  if (Date.now() >= txn.expiresAt && txn.status === 'PENDING') {
+    txn.status = 'DENIED';
+    txn.error = 'AUTHORIZATION_TRANSACTION_EXPIRED';
+  }
 
-  const target = new URL(redirectUri);
-  target.searchParams.set('code', code);
-  if (stateParam) target.searchParams.set('state', stateParam);
-  target.searchParams.set('iss', PUBLIC_BASE_URL);
-  res.writeHead(302, { location: target.toString(), 'cache-control': 'no-store' });
-  res.end();
+  if (txn.status === 'APPROVED') {
+    const redirect = txn.redirect;
+    s9AuthTransactions.delete(txnId);
+    writeJson(res, 200, { status: 'APPROVED', redirect });
+    return;
+  }
+
+  if (txn.status === 'DENIED') {
+    const error = txn.error || 'LOCAL_APPROVAL_NOT_GRANTED';
+    s9AuthTransactions.delete(txnId);
+    writeJson(res, 200, { status: 'DENIED', error });
+    return;
+  }
+
+  writeJson(res, 200, { status: 'PENDING' });
 }
 
 async function handleS9Token(req, res) {
   try {
+    console.log('[s9-oauth] token=request');
     const raw = await readHttpBody(req);
     const form = new URLSearchParams(raw);
     const grantType = String(form.get('grant_type') || '');
@@ -1887,6 +1991,7 @@ const server = http.createServer((req, res) => {
     url.pathname === '/.well-known/oauth-protected-resource' ||
     url.pathname === '/.well-known/oauth-protected-resource/mcp-chatgpt-s9'
   ) {
+    console.log('[s9-oauth] protected_resource_metadata=request');
     writeJson(res, 200, {
       resource: S9_RESOURCE,
       authorization_servers: [PUBLIC_BASE_URL],
@@ -1900,6 +2005,7 @@ const server = http.createServer((req, res) => {
     url.pathname === '/.well-known/oauth-authorization-server' ||
     url.pathname === '/.well-known/openid-configuration'
   ) {
+    console.log('[s9-oauth] authorization_server_metadata=request');
     writeJson(res, 200, {
       issuer: PUBLIC_BASE_URL,
       authorization_endpoint: `${PUBLIC_BASE_URL}/oauth/authorize`,
