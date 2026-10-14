@@ -5,7 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const DEV_EXEC_TOKEN_SHA256 = 'ade84750c99fcd5dfe8a0edbcf0c60a17981388da1b7ea3f29d348f1cea47a9d';
 const DEV_EXEC_EXPIRES_AT = '2026-10-20T06:45:42Z';
 const PORT = Number(process.env.PORT || 3000);
@@ -857,6 +857,187 @@ function buildDevPublicMcpServer() {
   return mcp;
 }
 
+
+function buildDevTakeoverMcpServer() {
+  const mcp = new McpServer(
+    {
+      name: 'Selfish Dev Human Takeover Recovery',
+      version: VERSION
+    },
+    {
+      instructions:
+        'Temporary authenticated S6 development bridge. It tests human takeover on the exact same local browser session. During takeover, automation and preview collection are paused. Resume is explicit and locally revalidated. No credentials are requested or transported.'
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_relay_status',
+    {
+      title: 'Selfish Relay Status',
+      description: 'Read whether the paired local Selfish worker is connected.',
+      inputSchema: z.object({}).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const connected = devices.has(DEFAULT_DEVICE_ID);
+      return {
+        content: [{ type: 'text', text: `Selfish relay online; local_worker_connected=${connected}` }],
+        structuredContent: {
+          status: 'PASS',
+          relay_version: VERSION,
+          local_worker_connected: connected,
+          connected_device_count: devices.size
+        }
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_status',
+    {
+      title: 'Selfish Status',
+      description: 'Read the paired local Selfish worker state and takeover metadata without reading page DOM or secrets.',
+      inputSchema: z.object({}).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const result = await sendDeviceJob(DEFAULT_DEVICE_ID, 'STATUS', {});
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Selfish state=${result.result?.state ?? 'UNKNOWN'}`
+              : `Selfish ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_trigger_takeover_test',
+    {
+      title: 'Trigger Selfish Human Takeover Test',
+      description:
+        'Trigger the bounded S6 takeover boundary on the Selenium public demo Password field. The supplied probe marker is synthetic and must never be a real password.',
+      inputSchema: z.object({
+        request_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
+        probe_marker: z.string().min(1).max(64).regex(/^[A-Za-z0-9._:-]+$/)
+      }).strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async ({ request_id, probe_marker }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'TAKEOVER_TEST_TRIGGER',
+        { request_id, probe_marker },
+        35000
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'TAKEOVER_REQUIRED'
+              ? 'Selfish takeover required; same local browser session is visible and automation is paused.'
+              : `Selfish takeover test ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_takeover_privacy_probe',
+    {
+      title: 'Probe Selfish Takeover Privacy Fence',
+      description:
+        'Read takeover state and verify the local preview endpoint is blocked. This does not read page DOM, image pixels, credentials, or input.',
+      inputSchema: z.object({}).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async () => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'TAKEOVER_PRIVACY_PROBE',
+        {},
+        10000
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? `Takeover fence state=${result.result?.state ?? 'UNKNOWN'} preview_blocked=${result.result?.preview_blocked ?? false}`
+              : `Takeover privacy probe ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  mcp.registerTool(
+    'selfish_resume_takeover_test',
+    {
+      title: 'Explicitly Resume Selfish Takeover Test',
+      description:
+        'Resume the bounded S6 takeover test only after the human has manually checked Default checkbox in the visible Selenium page. The local worker revalidates same page identity, page count, URL, and proof before hiding the same browser again.',
+      inputSchema: z.object({
+        takeover_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/)
+      }).strict(),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async ({ takeover_id }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'TAKEOVER_TEST_RESUME',
+        { takeover_id },
+        20000
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text:
+            result.status === 'PASS'
+              ? 'Selfish explicit resume revalidation passed; browser returned to hidden autonomous mode.'
+              : `Selfish resume ${result.status}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
+  return mcp;
+}
+
 const mcpHandler = createMcpHandler(buildMcpServer);
 const nodeMcpHandler = toNodeHandler(mcpHandler);
 const devMcpHandler = createMcpHandler(buildDevMcpServer);
@@ -869,6 +1050,8 @@ const devPrimitiveMcpHandler = createMcpHandler(buildDevPrimitiveMcpServer);
 const nodeDevPrimitiveMcpHandler = toNodeHandler(devPrimitiveMcpHandler);
 const devPublicMcpHandler = createMcpHandler(buildDevPublicMcpServer);
 const nodeDevPublicMcpHandler = toNodeHandler(devPublicMcpHandler);
+const devTakeoverMcpHandler = createMcpHandler(buildDevTakeoverMcpServer);
+const nodeDevTakeoverMcpHandler = toNodeHandler(devTakeoverMcpHandler);
 
 const server = http.createServer((req, res) => {
   const base = `http://${req.headers.host || 'localhost'}`;
@@ -943,6 +1126,19 @@ const server = http.createServer((req, res) => {
       return;
     }
     void nodeDevPublicMcpHandler(req, res);
+    return;
+  }
+
+  if (url.pathname === '/mcp-dev-takeover') {
+    if (!authorizeDevExec(req)) {
+      res.writeHead(401, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      res.end(JSON.stringify({ error: 'UNAUTHORIZED_DEV_TAKEOVER' }));
+      return;
+    }
+    void nodeDevTakeoverMcpHandler(req, res);
     return;
   }
 
