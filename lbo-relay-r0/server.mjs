@@ -2031,6 +2031,11 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === '/oauth/authorize/poll' && req.method === 'GET') {
+    handleS9AuthorizePoll(req, res, url);
+    return;
+  }
+
   if (url.pathname === '/oauth/token' && req.method === 'POST') {
     void handleS9Token(req, res);
     return;
