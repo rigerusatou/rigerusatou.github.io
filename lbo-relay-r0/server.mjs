@@ -409,6 +409,7 @@ async function handleS9Token(req, res) {
     console.log(`[s9-oauth] token_target=${targetState}`);
 
     if (requestedResources.length > 1 || resource !== S9_RESOURCE || !clientId.startsWith('selfish-s9-')) {
+      console.log('[s9-oauth] token_outcome=invalid_target');
       writeJson(res, 400, { error: 'invalid_target' });
       return;
     }
@@ -428,6 +429,7 @@ async function handleS9Token(req, res) {
         rec.resource !== resource ||
         !s9AllowedRedirectUri(redirectUri)
       ) {
+        console.log('[s9-oauth] token_outcome=invalid_grant');
         writeJson(res, 400, { error: 'invalid_grant' });
         return;
       }
@@ -438,10 +440,12 @@ async function handleS9Token(req, res) {
         .digest('base64url');
 
       if (!safeEqual(actualChallenge, rec.codeChallenge)) {
+        console.log('[s9-oauth] token_outcome=pkce_mismatch');
         writeJson(res, 400, { error: 'invalid_grant' });
         return;
       }
 
+      console.log('[s9-oauth] token_outcome=issued_authorization_code');
       writeJson(res, 200, s9IssueTokens(clientId, rec.scope));
       return;
     }
@@ -449,15 +453,19 @@ async function handleS9Token(req, res) {
     if (grantType === 'refresh_token') {
       const refresh = s9VerifyToken(String(form.get('refresh_token') || ''), 'refresh');
       if (!refresh || refresh.cid !== clientId) {
+        console.log('[s9-oauth] token_outcome=invalid_refresh');
         writeJson(res, 400, { error: 'invalid_grant' });
         return;
       }
+      console.log('[s9-oauth] token_outcome=issued_refresh');
       writeJson(res, 200, s9IssueTokens(clientId, refresh.scope));
       return;
     }
 
+    console.log('[s9-oauth] token_outcome=unsupported_grant_type');
     writeJson(res, 400, { error: 'unsupported_grant_type' });
   } catch {
+    console.log('[s9-oauth] token_outcome=invalid_request');
     writeJson(res, 400, { error: 'invalid_request' });
   }
 }
