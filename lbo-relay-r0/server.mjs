@@ -396,9 +396,19 @@ async function handleS9Token(req, res) {
     const form = new URLSearchParams(raw);
     const grantType = String(form.get('grant_type') || '');
     const clientId = String(form.get('client_id') || '');
-    const resource = String(form.get('resource') || '');
+    // RFC 8707: resource is optional in a token request. The authorization
+    // code and every issued token remain bound to this fixed S9 resource.
+    // Reject an explicitly wrong target or duplicate resource parameters.
+    const requestedResources = form.getAll('resource');
+    const resource = requestedResources.length === 0
+      ? S9_RESOURCE
+      : requestedResources[0];
+    const targetState = requestedResources.length === 0
+      ? 'defaulted'
+      : (requestedResources.length === 1 && resource === S9_RESOURCE ? 'explicit' : 'invalid');
+    console.log(`[s9-oauth] token_target=${targetState}`);
 
-    if (resource !== S9_RESOURCE || !clientId.startsWith('selfish-s9-')) {
+    if (requestedResources.length > 1 || resource !== S9_RESOURCE || !clientId.startsWith('selfish-s9-')) {
       writeJson(res, 400, { error: 'invalid_target' });
       return;
     }
