@@ -51,11 +51,13 @@ function actionableResponse(response, tabId) {
 }
 
 function canRetryRead(response) {
-  if (!response || response.status === 'PASS' || response.status === 'BLOCKED') return false;
+  if (!response || response.status === 'PASS') return false;
   if (['DEVICE_OFFLINE', 'DEVICE_DISCONNECTED', 'TIMEOUT'].includes(response.status)) return true;
-  if (response.status !== 'FAILED') return false;
+  if (!['FAILED', 'BLOCKED'].includes(response.status)) return false;
   const reason = String(response.reason || response.result?.reason || '');
-  return TRANSIENT_EXTENSION_REASONS.test(reason);
+  // A policy BLOCKED is final; only an explicit extension-offline case may retry.
+  return TRANSIENT_EXTENSION_REASONS.test(reason) &&
+    (response.status === 'FAILED' || reason.startsWith('EXISTING_BRAVE_EXTENSION_OFFLINE'));
 }
 
 function uncertainWriteResult(response, requestId, tabId) {
