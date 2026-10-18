@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { routeOrdinaryTabTask } from './ordinary-bridge.mjs';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
@@ -1839,7 +1840,10 @@ function buildChatGptS9McpServer() {
       }
     },
     async ({ request_id, target_url, steps }) => {
-      const result = await sendDeviceJob(
+      const ordinary = await routeOrdinaryTabTask({
+        request_id, target_url, steps, allowWrites: false, sendDeviceJob, deviceId: DEFAULT_DEVICE_ID
+      });
+      const result = ordinary ?? await sendDeviceJob(
         DEFAULT_DEVICE_ID,
         'PUBLIC_BROWSER_TASK',
         {
@@ -1855,7 +1859,7 @@ function buildChatGptS9McpServer() {
           type: 'text',
           text:
             result.status === 'PASS'
-              ? 'Selfish public HTTPS read completed.'
+              ? (ordinary ? 'Selfish ordinary Brave tab read completed.' : 'Selfish public HTTPS read completed.')
               : `Selfish public HTTPS read ${result.status}: ${result.reason ?? 'unknown'}`
         }],
         structuredContent: result
@@ -1884,7 +1888,10 @@ function buildChatGptS9McpServer() {
       }
     },
     async ({ request_id, target_url, steps }) => {
-      const result = await sendDeviceJob(
+      const ordinary = await routeOrdinaryTabTask({
+        request_id, target_url, steps, allowWrites: true, sendDeviceJob, deviceId: DEFAULT_DEVICE_ID
+      });
+      const result = ordinary ?? await sendDeviceJob(
         DEFAULT_DEVICE_ID,
         'PUBLIC_BROWSER_TASK',
         {
@@ -1900,7 +1907,7 @@ function buildChatGptS9McpServer() {
           type: 'text',
           text:
             result.status === 'PASS'
-              ? 'Selfish public HTTPS interaction completed.'
+              ? (ordinary ? 'Selfish ordinary Brave tab interaction completed.' : 'Selfish public HTTPS interaction completed.')
               : `Selfish public HTTPS interaction ${result.status}: ${result.reason ?? 'unknown'}`
         }],
         structuredContent: result
