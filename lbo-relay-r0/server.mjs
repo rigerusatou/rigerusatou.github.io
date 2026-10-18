@@ -1778,6 +1778,46 @@ function buildChatGptS9McpServer() {
     }
   );
 
+  // Reads only the snapshot explicitly shared from the user's ordinary Brave
+  // extension to the paired Windows worker. The model does not enumerate tabs
+  // directly and never receives browser cookies or extension pairing secrets.
+  mcp.registerTool(
+    'selfish_list_existing_brave_tabs',
+    {
+      title: 'List ordinary Brave tabs shared with Selfish',
+      description:
+        'Read the latest manually shared ordinary Brave tab snapshot (tab ID, title, sanitized URL, active flag). Includes age_seconds and received_at. These are not live tabs; if stale, ask the user to refresh using the Selfish Brave extension. No tab modifications.',
+      inputSchema: z.object({
+        limit: z.number().int().min(1).max(100).optional()
+      }).strict(),
+      securitySchemes: readSecurity,
+      _meta: { securitySchemes: readSecurity },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async ({ limit }) => {
+      const result = await sendDeviceJob(
+        DEFAULT_DEVICE_ID,
+        'NORMAL_TABS_SNAPSHOT',
+        { limit: limit ?? 50 },
+        15000
+      );
+      return {
+        content: [{
+          type: 'text',
+          text: result.status === 'PASS'
+            ? `Selfish ordinary Brave snapshot retrieved (${result.result?.shown ?? 0} of ${result.result?.count ?? 0} tabs; age ${result.result?.age_seconds ?? '?'}s).`
+            : `Selfish ordinary Brave snapshot ${result.status}: ${result.reason ?? 'unknown'}`
+        }],
+        structuredContent: result
+      };
+    }
+  );
+
   mcp.registerTool(
     'selfish_read_public_https',
     {
