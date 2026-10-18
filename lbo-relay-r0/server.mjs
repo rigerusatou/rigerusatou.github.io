@@ -1710,6 +1710,16 @@ function buildChatGptS9McpServer() {
   const readStep = z.discriminatedUnion('action', [
     z.object({ action: z.literal('NAVIGATE') }).strict(),
     z.object({ action: z.literal('READ_TITLE') }).strict(),
+    // Bounded full-page DOM text and link discovery for existing S9 tools.
+    // Worker performs origin/scope checks and excludes secret form values.
+    z.object({
+      action: z.literal('READ_PAGE_TEXT'),
+      max_chars: z.number().int().min(1).max(16000)
+    }).strict(),
+    z.object({
+      action: z.literal('LIST_LINKS'),
+      max_items: z.number().int().min(1).max(150)
+    }).strict(),
     z.object({
       action: z.literal('READ_TEXT'),
       locator: readableLocator,
@@ -1720,6 +1730,16 @@ function buildChatGptS9McpServer() {
   const interactStep = z.discriminatedUnion('action', [
     z.object({ action: z.literal('NAVIGATE') }).strict(),
     z.object({ action: z.literal('READ_TITLE') }).strict(),
+    // Bounded full-page DOM text and link discovery for existing S9 tools.
+    // Worker performs origin/scope checks and excludes secret form values.
+    z.object({
+      action: z.literal('READ_PAGE_TEXT'),
+      max_chars: z.number().int().min(1).max(16000)
+    }).strict(),
+    z.object({
+      action: z.literal('LIST_LINKS'),
+      max_items: z.number().int().min(1).max(150)
+    }).strict(),
     z.object({
       action: z.literal('READ_TEXT'),
       locator: readableLocator,
@@ -1825,7 +1845,7 @@ function buildChatGptS9McpServer() {
     {
       title: 'Read a public HTTPS page with Selfish',
       description:
-        'Navigate to a caller-supplied public HTTPS page and perform semantic read operations only. Private/local/metadata destinations and redirect escape are blocked locally.',
+        'Read a caller-supplied public HTTPS page using bounded semantic steps, including READ_PAGE_TEXT and LIST_LINKS when supported by the paired Windows worker. Existing Brave tabs use ordinary:<tab id>:<nonce> request_id and must match target_url. Private/local/metadata destinations and redirect escape are blocked locally.',
       inputSchema: z.object({
         request_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
         target_url: z.string().url().max(512),
