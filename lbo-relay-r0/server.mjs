@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { routeOrdinaryTabTask } from './ordinary-bridge.mjs';
+import {routeMultiPageBatch} from './multipage-batch.mjs';
 import {routeTabInventoryRead} from './tab-inventory.mjs';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
@@ -1844,13 +1845,16 @@ function buildChatGptS9McpServer() {
     async ({ request_id, target_url, steps }) => {
       // Existing S9 tool schema remains unchanged: one reserved, read-only READ_TEXT
       // locator exposes the paired Brave extension's fresh public-HTTPS tab inventory.
-      const inventory = await routeTabInventoryRead({
+      const multiPage = await routeMultiPageBatch({
         request_id, target_url, steps, sendDeviceJob, deviceId: DEFAULT_DEVICE_ID
       });
-      const ordinary = inventory ? null : await routeOrdinaryTabTask({
+      const inventory = multiPage ? null : await routeTabInventoryRead({
+        request_id, target_url, steps, sendDeviceJob, deviceId: DEFAULT_DEVICE_ID
+      });
+      const ordinary = (multiPage || inventory) ? null : await routeOrdinaryTabTask({
         request_id, target_url, steps, allowWrites: false, sendDeviceJob, deviceId: DEFAULT_DEVICE_ID
       });
-      const result = inventory ?? ordinary ?? await sendDeviceJob(
+      const result = multiPage ?? inventory ?? ordinary ?? await sendDeviceJob(
         DEFAULT_DEVICE_ID,
         'PUBLIC_BROWSER_TASK',
         {
@@ -1866,7 +1870,7 @@ function buildChatGptS9McpServer() {
           type: 'text',
           text:
             result.status === 'PASS'
-              ? (inventory ? 'Selfish paired ordinary Brave tab inventory retrieved.' : ordinary ? 'Selfish ordinary Brave tab read completed.' : 'Selfish public HTTPS read completed.')
+              ? (multiPage ? 'Selfish bounded public HTTPS multi-page read completed.' : inventory ? 'Selfish paired ordinary Brave tab inventory retrieved.' : ordinary ? 'Selfish ordinary Brave tab read completed.' : 'Selfish public HTTPS read completed.')
               : `Selfish public HTTPS read ${result.status}: ${result.reason ?? 'unknown'}`
         }],
         structuredContent: result
