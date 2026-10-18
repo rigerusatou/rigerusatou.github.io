@@ -1827,7 +1827,7 @@ function buildChatGptS9McpServer() {
     {
       title: 'Read a public HTTPS page with Selfish',
       description:
-        'Perform public HTTPS read operations, or enumerate paired ordinary Brave tab metadata with request_id tabs:<nonce>, fixed target_url https://lbo-relay-r0.onrender.com/, and READ_TEXT role=link name=SELFISH_TAB_LIST_CHUNK_000 max_chars=2048. No cookies or secrets. Private/local/metadata destinations and redirect escape are blocked locally.',
+        'S9 read primitives: READ_TEXT role=link name SELFISH_PAGE_TEXT_CHUNK_000 obtains page text, SELFISH_LIST_LINKS_CHUNK_000 obtains links, max_chars=2048; use suffix _001 for subsequent chunks. Existing Brave tab reads use request_id ordinary:<tab-id>:<nonce> with its matching public HTTPS tab URL. Tab inventory uses request_id tabs:<nonce>, target_url https://lbo-relay-r0.onrender.com/, role/link name SELFISH_TAB_LIST_CHUNK_000. Public multi-page batch uses request_id batch:<nonce> and READ_TEXT role/link name SELFISH_BATCH_TEXT_CHUNK_000_<base64url(relative-path)> or SELFISH_BATCH_LINKS_CHUNK_000_<base64url(relative-path)>; max 3 same-origin public pages. No browser secrets, private addresses, or writes allowed through this read tool.',
       inputSchema: z.object({
         request_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
         target_url: z.string().url().max(512),
