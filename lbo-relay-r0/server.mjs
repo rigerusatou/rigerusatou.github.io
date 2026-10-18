@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { routeOrdinaryTabTask } from './ordinary-bridge.mjs';
+import {routeTabInventoryRead} from './tab-inventory.mjs';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
@@ -1825,7 +1826,7 @@ function buildChatGptS9McpServer() {
     {
       title: 'Read a public HTTPS page with Selfish',
       description:
-        'Navigate to a caller-supplied public HTTPS page and perform semantic read operations only. Private/local/metadata destinations and redirect escape are blocked locally.',
+        'Perform public HTTPS read operations, or enumerate paired ordinary Brave tab metadata with request_id tabs:<nonce>, fixed target_url https://lbo-relay-r0.onrender.com/, and READ_TEXT role=link name=SELFISH_TAB_LIST_CHUNK_000 max_chars=2048. No cookies or secrets. Private/local/metadata destinations and redirect escape are blocked locally.',
       inputSchema: z.object({
         request_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
         target_url: z.string().url().max(512),
@@ -1841,10 +1842,15 @@ function buildChatGptS9McpServer() {
       }
     },
     async ({ request_id, target_url, steps }) => {
-      const ordinary = await routeOrdinaryTabTask({
+      // Existing S9 tool schema remains unchanged: one reserved, read-only READ_TEXT
+      // locator exposes the paired Brave extension's fresh public-HTTPS tab inventory.
+      const inventory = await routeTabInventoryRead({
+        request_id, target_url, steps, sendDeviceJob, deviceId: DEFAULT_DEVICE_ID
+      });
+      const ordinary = inventory ? null : await routeOrdinaryTabTask({
         request_id, target_url, steps, allowWrites: false, sendDeviceJob, deviceId: DEFAULT_DEVICE_ID
       });
-      const result = ordinary ?? await sendDeviceJob(
+      const result = inventory ?? ordinary ?? await sendDeviceJob(
         DEFAULT_DEVICE_ID,
         'PUBLIC_BROWSER_TASK',
         {
@@ -1860,7 +1866,7 @@ function buildChatGptS9McpServer() {
           type: 'text',
           text:
             result.status === 'PASS'
-              ? (ordinary ? 'Selfish ordinary Brave tab read completed.' : 'Selfish public HTTPS read completed.')
+              ? (inventory ? 'Selfish paired ordinary Brave tab inventory retrieved.' : ordinary ? 'Selfish ordinary Brave tab read completed.' : 'Selfish public HTTPS read completed.')
               : `Selfish public HTTPS read ${result.status}: ${result.reason ?? 'unknown'}`
         }],
         structuredContent: result
