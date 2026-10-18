@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {routeOrdinaryTabTask} from './ordinary-bridge.mjs';
+import {routeOrdinaryTabTask, canonicalOrdinaryUrl} from './ordinary-bridge.mjs';
 
 const tab_id=1234567;
 const target_url='https://www.selenium.dev/selenium/web/web-form.html';
@@ -77,4 +77,11 @@ test('ordinary routing never changes legacy requests',async()=>{
   const {result,calls}=await run([],{request_id:'legacy-request-id'});
   assert.equal(result,null);
   assert.equal(calls.length,0);
+});
+
+test('public-HTTPS boundary rejects loopback, private IP, and local names',()=>{
+  for(const url of ['http://example.com/','https://127.0.0.1/','https://192.168.0.1/','https://[::1]/','https://host.local/','https://metadata.google.internal/']){
+    assert.equal(canonicalOrdinaryUrl(url),null,url);
+  }
+  assert.equal(canonicalOrdinaryUrl('https://github.com/test?q=1'),'https://github.com/test');
 });
