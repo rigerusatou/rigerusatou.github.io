@@ -67,6 +67,10 @@ export async function routeMultiPageBatch({request_id,target_url,steps,sendDevic
   try{response=await sendDeviceJob(deviceId,'PUBLIC_BROWSER_TASK',job,25000);}
   catch{return {status:'DEVICE_DISCONNECTED',reason:'MULTIPAGE_DEVICE_JOB_FAILED',pages_completed:pageNo};}
   if(response?.status!=='PASS')return {status:response?.status||'FAILED',reason:response?.reason||'MULTIPAGE_PAGE_FAILED',pages_completed:pageNo};
+  const finalUrl=response?.result?.result?.final_url??response?.result?.final_url;
+  try{
+   if(typeof finalUrl!=='string'||new URL(finalUrl).origin!==new URL(url).origin)return blocked('MULTIPAGE_REDIRECT_OR_ORIGIN_MISMATCH');
+  }catch{return blocked('MULTIPAGE_INVALID_FINAL_URL');}
   const seen=getSteps(response);
   if(!Array.isArray(seen)||seen.length!==job.steps.length||seen.some(s=>s.pass!==true))return blocked('MULTIPAGE_INCOMPLETE_WORKER_RESULT');
   const title=seen[1]?.value;
