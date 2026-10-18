@@ -60,6 +60,11 @@ test('ambiguous or blocked read errors are not retried',async()=>{
   assert.equal(result.status,'BLOCKED');
   assert.equal(calls.length,2);
 });
+test('only transient extension-offline BLOCKED can retry as a read',async()=>{
+  const {result,calls}=await run([S(),A({status:'BLOCKED',reason:'EXISTING_BRAVE_EXTENSION_OFFLINE'}),S(),A()]);
+  assert.equal(result.status,'PASS');
+  assert.equal(calls.filter(x=>x.op==='NORMAL_TAB_ACTION').length,2);
+});
 test('timeout after write dispatch stays uncertain without second dispatch',async()=>{
   const {result,calls}=await run([S(),A({status:'FAILED',reason:'EXTENSION_TIMEOUT'})],{
     steps:click,allowWrites:true
