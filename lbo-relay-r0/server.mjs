@@ -471,23 +471,23 @@ async function handleS9Token(req, res) {
   }
 }
 
-function resolvePending(requestId, payload) {
+function resolvePending(requestId, payload, socket) {
   const item = pending.get(requestId);
-  if (!item) return;
+  if (!item || item.socket !== socket) return;
   pending.delete(requestId);
   clearTimeout(item.timer);
   item.resolve(payload);
 }
 
-function rejectDevicePending(deviceId, reason) {
+function rejectSocketPending(socket, reason) {
   for (const [id, item] of pending.entries()) {
-    if (item.deviceId === deviceId) {
+    if (item.socket === socket) {
       pending.delete(id);
       clearTimeout(item.timer);
       item.resolve({
         status: 'DEVICE_DISCONNECTED',
         reason,
-        device_id: deviceId,
+        device_id: item.deviceId,
         request_id: id
       });
     }
@@ -515,7 +515,8 @@ async function sendDeviceJob(deviceId, operation, input = {}, timeoutMs = 20000)
     pending.set(requestId, {
       resolve,
       timer,
-      deviceId
+      deviceId,
+      socket: ws
     });
   });
 
@@ -2181,6 +2182,9 @@ wss.on('connection', (ws) => {
   const previous = devices.get(deviceId);
 
   if (previous && previous !== ws) {
+    // The old socket might already have dispatched writes. Fail its pending
+    // requests without replaying them; never affect the new socket's jobs.
+    rejectSocketPending(previous, 'websocket_replaced');
     try { previous.close(4001, 'replaced'); } catch {}
   }
 
@@ -2199,7 +2203,7 @@ wss.on('connection', (ws) => {
       msg?.type === 'result' &&
       typeof msg.request_id === 'string'
     ) {
-      resolvePending(msg.request_id, msg);
+      resolvePending(msg.request_id, msg, ws);
     }
   });
 
@@ -2207,7 +2211,7 @@ wss.on('connection', (ws) => {
     if (devices.get(deviceId) === ws) {
       devices.delete(deviceId);
     }
-    rejectDevicePending(deviceId, 'websocket_closed');
+    rejectSocketPending(ws, 'websocket_closed');
     console.log(`[relay] Selfish device disconnected: ${deviceId}`);
   });
 });
