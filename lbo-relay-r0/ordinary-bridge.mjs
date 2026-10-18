@@ -1,3 +1,4 @@
+import {isIP} from 'node:net';
 /** S9 ordinary Brave tab adapter. Explicit opt-in via ordinary:<tab id>:<nonce> request ID. */
 const ORDINARY_PREFIX = 'ordinary:';
 const REQUEST_PATTERN = /^ordinary:([0-9]{1,12}):(repeat-)?([A-Za-z0-9._-]{8,80})$/;
@@ -21,6 +22,11 @@ export function canonicalOrdinaryUrl(value) {
   try {
     const parsed = new URL(value);
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return null;
+    // Preserve the S9 public-HTTPS boundary for ordinary Brave routing.
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    if (!host.includes('.') || isIP(host) !== 0 || host.includes(':') ||
+        /(^|\.)(localhost|local|internal|lan|onion|test|invalid)$/.test(host) ||
+        /\.(home\.arpa|nip\.io|sslip\.io|xip\.io)$/.test(host)) return null;
     return parsed.origin + parsed.pathname;
   } catch { return null; }
 }
