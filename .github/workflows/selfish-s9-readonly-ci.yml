@@ -1,0 +1,26 @@
+name: Selfish S9 Read-only Regression
+on:
+  push:
+    branches:
+      - selfish/s9-multipage-batch-read-20261019
+  pull_request:
+    paths:
+      - 'lbo-relay-r0/**'
+      - '.github/workflows/selfish-s9-readonly-ci.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax check
+        run: |
+          node --check lbo-relay-r0/server.mjs
+          node --check lbo-relay-r0/multipage-batch.mjs
+      - name: Run isolated Node.js regression suite
+        run: node --test lbo-relay-r0/tests/*.test.mjs
