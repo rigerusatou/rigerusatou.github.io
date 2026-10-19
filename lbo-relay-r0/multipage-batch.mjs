@@ -33,7 +33,7 @@ export function parseBatchStep(step,baseUrl){
  const m=NAME_RE.exec(step.locator.name||'');
  if(!m)return null;
  const url=validateBatchTarget(baseUrl,m[3]);
- return url?{kind:m[1],index:Number(m[2]),url}:null;
+ return url&&Number(m[2])<=31?{kind:m[1],index:Number(m[2]),url}:null;
 }
 
 function getSteps(response){
@@ -55,6 +55,7 @@ export async function routeMultiPageBatch({request_id,target_url,steps,sendDevic
   if(!arr.some(x=>x.kind===item.kind&&x.index===item.index))arr.push(item);
   byUrl.set(item.url,arr);
  }
+ if([...byUrl.values()].some(reads=>reads.length>6))return blocked('MULTIPAGE_PER_PAGE_STEP_LIMIT');
  const results=new Map();
  for(const [pageNo,[url,reads]] of [...byUrl.entries()].entries()){
   const readSteps=reads.map(item=>({
@@ -69,7 +70,7 @@ export async function routeMultiPageBatch({request_id,target_url,steps,sendDevic
   if(response?.status!=='PASS')return {status:response?.status||'FAILED',reason:response?.reason||'MULTIPAGE_PAGE_FAILED',pages_completed:pageNo};
   const finalUrl=response?.result?.result?.final_url??response?.result?.final_url;
   try{
-   if(typeof finalUrl!=='string'||new URL(finalUrl).origin!==new URL(url).origin)return blocked('MULTIPAGE_REDIRECT_OR_ORIGIN_MISMATCH');
+   if(typeof finalUrl!=='string'||new URL(finalUrl).href!==new URL(url).href)return blocked('MULTIPAGE_REDIRECT_OR_ORIGIN_MISMATCH');
   }catch{return blocked('MULTIPAGE_INVALID_FINAL_URL');}
   const seen=getSteps(response);
   if(!Array.isArray(seen)||seen.length!==job.steps.length||seen.some(s=>s.pass!==true))return blocked('MULTIPAGE_INCOMPLETE_WORKER_RESULT');
