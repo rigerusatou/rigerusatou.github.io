@@ -86,3 +86,25 @@ test('duplicate read specs do not trigger extra navigation',async()=>{
  assert.equal(calls[0][2].steps.length,3);
  assert.equal(r.result.step_results.length,2);
 });
+
+test('rejects more than six unique reads per page before any worker dispatch',async()=>{
+ const steps=Array.from({length:7},(_,i)=>mkStep('/selenium/web/index.html','TEXT',i));
+ const r=await routeMultiPageBatch({...job(steps),sendDeviceJob:async()=>{throw Error('SHOULD_NOT_DISPATCH');}});
+ assert.equal(r.status,'BLOCKED');
+ assert.equal(r.reason,'MULTIPAGE_PER_PAGE_STEP_LIMIT');
+});
+test('allows six reads plus navigation and title, within worker eight-step limit',async()=>{
+ let seen;
+ const steps=Array.from({length:6},(_,i)=>mkStep('/selenium/web/index.html','TEXT',i));
+ const r=await routeMultiPageBatch({...job(steps),sendDeviceJob:async(...args)=>{seen=args;return fake()(...args);}});
+ assert.equal(r.status,'PASS');
+ assert.equal(seen[2].steps.length,8);
+});
+test('rejects out-of-range chunk index before dispatch',async()=>{
+ const r=await routeMultiPageBatch({...job([mkStep('/selenium/web/index.html','TEXT',999)]),sendDeviceJob:async()=>{throw Error('SHOULD_NOT_DISPATCH');}});
+ assert.equal(r.reason,'INVALID_MULTIPAGE_TARGET_OR_STEP');
+});
+test('rejects same-origin redirects to another page to preserve source attribution',async()=>{
+ const r=await routeMultiPageBatch({...job([mkStep('/a')]),sendDeviceJob:fake('https://www.selenium.dev/different')});
+ assert.equal(r.reason,'MULTIPAGE_REDIRECT_OR_ORIGIN_MISMATCH');
+});
