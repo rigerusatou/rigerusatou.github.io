@@ -140,16 +140,32 @@ function s9IssueTokens(clientId, scope) {
   };
 }
 
+// Exact Claude hosted-app callback (claude.ai web, Desktop, mobile, Cowork).
+// Source: claude.com/docs/connectors/building/authentication#callback-urls
+const S9_CLAUDE_REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
+
 function s9AllowedRedirectUri(raw) {
   try {
     const u = new URL(raw);
-    if (u.protocol !== 'https:' || u.hostname !== 'chatgpt.com') return false;
+    if (u.protocol !== 'https:' || u.username || u.password || u.port) return false;
+    if (u.hostname === 'claude.ai') {
+      return u.href === S9_CLAUDE_REDIRECT_URI;
+    }
+    if (u.hostname !== 'chatgpt.com') return false;
     return (
       u.pathname === '/connector_platform_oauth_redirect' ||
       u.pathname.startsWith('/connector/oauth/')
     );
   } catch {
     return false;
+  }
+}
+
+function s9ClientLabel(redirectUri) {
+  try {
+    return new URL(redirectUri).hostname === 'claude.ai' ? 'Claude' : 'ChatGPT';
+  } catch {
+    return 'AI client';
   }
 }
 
@@ -209,8 +225,13 @@ async function handleS9DynamicRegistration(req, res) {
     console.log('[s9-oauth] dynamic_registration=request');
     const raw = await readHttpBody(req);
     const body = JSON.parse(raw || '{}');
-    const redirects = Array.isArray(body.redirect_uris) ? body.redirect_uris.map(String) : [];
-    if (redirects.length < 1 || redirects.some(x => !s9AllowedRedirectUri(x))) {
+    const requestedRedirects = Array.isArray(body.redirect_uris) ? body.redirect_uris.map(String) : [];
+    // Register only the allowlisted callbacks a client offers. A client that
+    // also lists other callbacks (for example a second Claude host) is not
+    // rejected outright; authorize and token still re-check the exact URI.
+    const redirects = requestedRedirects.filter(x => s9AllowedRedirectUri(x));
+    console.log(`[s9-oauth] dynamic_registration_redirects requested=${requestedRedirects.length} allowed=${redirects.length} hosts=${requestedRedirects.map(x => { try { const u = new URL(x); return u.host + u.pathname; } catch { return 'invalid'; } }).join(',').slice(0, 300)}`);
+    if (redirects.length < 1) {
       writeJson(res, 400, { error: 'invalid_redirect_uri' });
       return;
     }
@@ -226,7 +247,7 @@ async function handleS9DynamicRegistration(req, res) {
       token_endpoint_auth_method: 'none',
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
-      client_name: 'ChatGPT'
+      client_name: s9ClientLabel(redirects[0])
     });
   } catch {
     writeJson(res, 400, { error: 'invalid_client_metadata' });
@@ -241,8 +262,9 @@ async function handleS9Authorize(req, res, url) {
   const stateParam = String(q.get('state') || '');
   const codeChallenge = String(q.get('code_challenge') || '');
   const codeChallengeMethod = String(q.get('code_challenge_method') || '');
-  const resource = String(q.get('resource') || '');
+  const resource = String(q.get('resource') || S9_RESOURCE);
   const scope = String(q.get('scope') || 'selfish.read selfish.write offline_access');
+  const clientLabel = s9ClientLabel(redirectUri);
 
   if (
     responseType !== 'code' ||
@@ -318,7 +340,7 @@ async function handleS9Authorize(req, res, url) {
 <html>
 <head>
 <meta charset="utf-8">
-<title>Selfish - Approve ChatGPT connection</title>
+<title>Selfish - Approve ${clientLabel} connection</title>
 <style>
 body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#111;color:#eee;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
 .card{max-width:560px;padding:28px;border:1px solid #333;border-radius:16px;background:#181818}
@@ -330,8 +352,8 @@ code{background:#242424;padding:2px 6px;border-radius:6px}
 <body>
 <div class="card">
 <h1>Selfish connection approval</h1>
-<p>ChatGPT is requesting a secure connection to the Selfish worker on this PC.</p>
-<p>Check Windows for the <code>Selfish - ChatGPT Connection Approval</code> dialog and click <b>Yes</b> only if you started this connection.</p>
+<p>${clientLabel} (<code>${new URL(redirectUri).hostname}</code>) is requesting a secure connection to the Selfish worker on this PC.</p>
+<p>Check Windows for the Selfish connection approval dialog and click <b>Yes</b> only if you started this connection.</p>
 <p id="status">Waiting for local approval...</p>
 </div>
 <script>
@@ -341,7 +363,7 @@ async function poll(){
     const r = await fetch('/oauth/authorize/poll?txn=${safeTxn}', {cache:'no-store'});
     const j = await r.json();
     if(j.status === 'APPROVED' && j.redirect){
-      statusEl.textContent = 'Approved. Returning to ChatGPT...';
+      statusEl.textContent = 'Approved. Returning to ${clientLabel}...';
       location.replace(j.redirect);
       return;
     }
