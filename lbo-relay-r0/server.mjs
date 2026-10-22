@@ -169,6 +169,19 @@ function s9ClientLabel(redirectUri) {
   }
 }
 
+// MCP spec: a tool returning structuredContent SHOULD also return the
+// serialized JSON as text. Some clients (claude.ai chat) pass only the text
+// content to the model, so page text/titles must be present there too.
+const S9_RESULT_TEXT_MAX = 60000;
+function s9ResultTextBlock(result) {
+  let text;
+  try { text = JSON.stringify(result ?? null); } catch { text = '{"status":"UNSERIALIZABLE_RESULT"}'; }
+  if (text.length > S9_RESULT_TEXT_MAX) {
+    text = text.slice(0, S9_RESULT_TEXT_MAX) + '...[TRUNCATED: full result is in structuredContent; read a smaller chunk]';
+  }
+  return { type: 'text', text };
+}
+
 function s9ScopeAllowed(scopeText) {
   const requested = String(scopeText || '')
     .split(/\s+/)
@@ -1798,7 +1811,7 @@ function buildChatGptS9McpServer() {
             result.status === 'PASS'
               ? `Selfish state=${result.result?.state ?? 'UNKNOWN'}`
               : `Selfish ${result.status}`
-        }],
+        }, s9ResultTextBlock(result)],
         structuredContent: result
       };
     }
@@ -1838,7 +1851,7 @@ function buildChatGptS9McpServer() {
           text: result.status === 'PASS'
             ? `Selfish ordinary Brave snapshot retrieved (${result.result?.shown ?? 0} of ${result.result?.count ?? 0} tabs; age ${result.result?.age_seconds ?? '?'}s).`
             : `Selfish ordinary Brave snapshot ${result.status}: ${result.reason ?? 'unknown'}`
-        }],
+        }, s9ResultTextBlock(result)],
         structuredContent: result
       };
     }
@@ -1894,7 +1907,7 @@ function buildChatGptS9McpServer() {
             result.status === 'PASS'
               ? (multiPage ? 'Selfish bounded public HTTPS multi-page read completed.' : inventory ? 'Selfish paired ordinary Brave tab inventory retrieved.' : ordinary ? 'Selfish ordinary Brave tab read completed.' : 'Selfish public HTTPS read completed.')
               : `Selfish public HTTPS read ${result.status}: ${result.reason ?? 'unknown'}`
-        }],
+        }, s9ResultTextBlock(result)],
         structuredContent: result
       };
     }
@@ -1942,7 +1955,7 @@ function buildChatGptS9McpServer() {
             result.status === 'PASS'
               ? (ordinary ? 'Selfish ordinary Brave tab interaction completed.' : 'Selfish public HTTPS interaction completed.')
               : `Selfish public HTTPS interaction ${result.status}: ${result.reason ?? 'unknown'}`
-        }],
+        }, s9ResultTextBlock(result)],
         structuredContent: result
       };
     }
